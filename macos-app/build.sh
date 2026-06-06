@@ -7,6 +7,11 @@ cd "$(dirname "$0")"
 APP="iMessage Insights.app"
 EXE="iMessageInsights"
 
+echo "→ generating app icon…"
+swift make-icon.swift
+iconutil -c icns AppIcon.iconset -o AppIcon.icns
+rm -rf AppIcon.iconset
+
 echo "→ compiling Swift…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -14,8 +19,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -o "$APP/Contents/MacOS/$EXE" Sources/main.swift \
   -framework Cocoa -framework WebKit
 
-echo "→ bundling server.py + Info.plist…"
+echo "→ bundling server.py + icon + Info.plist…"
 cp ../server.py "$APP/Contents/Resources/server.py"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Info.plist  "$APP/Contents/Info.plist"
 
 # Ad-hoc sign so it runs locally without "damaged app" warnings.

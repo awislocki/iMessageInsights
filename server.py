@@ -1034,6 +1034,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "vault": vault_status()})
             if u.path == "/api/vault":
                 return self._json(vault_status())
+            if u.path == "/api/status":
+                ok, err = db_readable()
+                return self._json({"demo": DEMO, "db_ok": ok, "db_error": err,
+                                   "has_key": bool(SETTINGS["api_key"]),
+                                   "vault": vault_status()})
             if u.path == "/api/estimate":
                 t = fetch_thread(qs["id"][0], range_cutoff_ns(qs.get("range", ["all"])[0]))
                 if not t or not t["messages"]:
@@ -1071,6 +1076,8 @@ class Handler(BaseHTTPRequestHandler):
         except sqlite3.OperationalError as e:
             return self._access_error(e)
         except Exception as e:
+            if any(w in str(e).lower() for w in ("denied", "unable to open database", "authoriz")):
+                return self._access_error(e)
             return self._send(500, f"Server error: {html.escape(str(e))}")
 
     # ---- POST -------------------------------------------------------------
@@ -1090,6 +1097,16 @@ class Handler(BaseHTTPRequestHandler):
                 ok = vault_unlock(data.get("password", ""))
                 st = vault_status(); st["ok"] = ok
                 return self._json(st)
+            if u.path == "/api/open-settings":
+                try:
+                    subprocess.Popen(["open",
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"])
+                    return self._json({"ok": True})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+            if u.path == "/api/demo":
+                enable_demo()
+                return self._json({"ok": True})
             if u.path == "/api/relationship":
                 save_relationship(data["id"], data.get("type", ""), data.get("notes", ""))
                 return self._json({"ok": True, **relationship_for(data["id"])})
@@ -1154,6 +1171,8 @@ class Handler(BaseHTTPRequestHandler):
         except sqlite3.OperationalError as e:
             return self._access_error(e)
         except Exception as e:
+            if any(w in str(e).lower() for w in ("denied", "unable to open database", "authoriz")):
+                return self._access_error(e)
             return self._json({"error": str(e)}, 500)
 
 
@@ -1233,6 +1252,19 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
             backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); }
   #screen.on { display:flex; }
   #screen .lk { font-size:32px; margin-bottom:10px; }
+  /* first-run onboarding (no Full Disk Access yet) */
+  #onboard { position:fixed; inset:0; z-index:250; display:none; align-items:center;
+             justify-content:center; background:var(--bg); }
+  #onboard.on { display:flex; }
+  .ob-card { background:var(--card); border:1px solid var(--line); border-radius:18px;
+             padding:28px 32px; max-width:480px; box-shadow:0 20px 60px rgba(0,0,0,.12); }
+  .ob-card .ob-icon { font-size:38px; }
+  .ob-card h2 { margin:10px 0 6px; font-size:20px; letter-spacing:-.01em; }
+  .ob-card p { color:var(--muted); margin:0 0 14px; line-height:1.5; }
+  .ob-card ol { color:var(--ink); font-size:13.5px; line-height:1.8; padding-left:20px; margin:0; }
+  .ob-actions { display:flex; gap:8px; margin-top:18px; flex-wrap:wrap; }
+  .ob-card details { margin-top:14px; }
+  .ob-card summary { cursor:pointer; font-size:11px; color:var(--muted); }
   .thread .t { display:flex; align-items:center; }
   .thread .t .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* insights controls */
@@ -1415,6 +1447,28 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   </div>
 </div>
 
+<div id="onboard">
+  <div class="ob-card">
+    <div class="ob-icon">💬</div>
+    <h2>Welcome to iMessage Insights</h2>
+    <p>To read your conversations, the app needs <b>Full Disk Access</b>. Everything stays
+      on your Mac — nothing is uploaded.</p>
+    <ol>
+      <li>Click <b>Open Full Disk Access settings</b> below.</li>
+      <li>Turn on <b>iMessage Insights</b> (or your terminal, if you launched from the command line).</li>
+      <li>Quit &amp; reopen, then click <b>Re-check</b>.</li>
+    </ol>
+    <div class="ob-actions">
+      <button class="primary" onclick="openFDA()">Open Full Disk Access settings</button>
+      <button onclick="recheck()">Re-check</button>
+      <button onclick="previewDemo()">Preview with sample data</button>
+    </div>
+    <div id="obStatus" class="hint" style="margin-top:10px"></div>
+    <details><summary>Technical detail</summary>
+      <div id="onboardErr" class="hint" style="margin-top:6px;word-break:break-word"></div></details>
+  </div>
+</div>
+
 <div id="screen"><span class="lk">🙈</span>Hidden for privacy — click or refocus to resume</div>
 
 <div class="modal" id="settings">
@@ -1463,6 +1517,9 @@ async function boot(){
     REL_TYPES.map(r=>`<option value="${esc(r)}">${relIcon(r)} ${esc(r)}</option>`).join('') +
     '<option value="__none">🔖 Unclassified</option>';
   document.getElementById('screen').onclick = screenOff;
+  // Access check first — if we can't read Messages, show onboarding (no scary error).
+  const st = await (await fetch('/api/status')).json();
+  if(!st.demo && !st.db_ok){ showOnboard(st.db_error); return; }
   updateLock(s.vault);
   await loadThreads();
   // If a vault exists but is locked, prompt to unlock so saved relationships
@@ -1472,6 +1529,24 @@ async function boot(){
   }
   setInterval(tick, 8000);
 }
+
+function showOnboard(err){
+  document.getElementById('onboard').classList.add('on');
+  if(err) document.getElementById('onboardErr').textContent = err;
+}
+async function openFDA(){
+  await fetch('/api/open-settings',{method:'POST'});
+  document.getElementById('obStatus').textContent =
+    'Opened System Settings → enable “iMessage Insights”, then return here and click Re-check.';
+}
+async function recheck(){
+  document.getElementById('obStatus').textContent = 'Checking…';
+  const st = await (await fetch('/api/status')).json();
+  if(st.db_ok || st.demo){ location.reload(); }
+  else { document.getElementById('obStatus').textContent =
+    'Still no access. Make sure it’s enabled, then fully quit and reopen the app.'; }
+}
+async function previewDemo(){ await fetch('/api/demo',{method:'POST'}); location.reload(); }
 
 function updateLock(st){
   const b=document.getElementById('lockBtn');
@@ -2021,17 +2096,13 @@ DEMO_CRITIQUE = {
                   "better": "Good to hear from you! Coffee as friends sometime would be nice - no rush."}]}
 
 
-def main():
+def enable_demo():
+    """Switch to demo data (fictional). Safe to call at runtime via /api/demo."""
     global DEMO
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--no-browser", action="store_true")
-    ap.add_argument("--demo", action="store_true",
-                    help="serve fictional demo data (no DB / key / vault needed)")
-    args = ap.parse_args()
-    if args.demo:
-        DEMO = True
+    DEMO = True
+    if not SETTINGS["api_key"]:
         SETTINGS["api_key"] = "demo-mode"
+    if not _DEMO_REL:
         for t in _demo_threads():
             _DEMO_REL[t["id"]] = {"type": t["rel"], "notes": t["notes"]}
         _DEMO_QA["d1"] = [{"q": "Is Alex trying to rekindle things?",
@@ -2040,9 +2111,33 @@ def main():
                  "coffee suggestion keeps it open-ended. Given you've classified this as an ex, "
                  "watch for mixed signals, but there's no clear push to rekindle.",
             "range": "month", "at": "2026-06-05 09:25:00"}]
+
+
+def db_readable():
+    """Can we actually read the Messages DB? Returns (ok, error_message)."""
+    if DEMO:
+        return True, None
+    try:
+        con = open_db()
+        con.execute("SELECT 1 FROM message LIMIT 1").fetchone()
+        con.close()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--demo", action="store_true",
+                    help="serve fictional demo data (no DB / key / vault needed)")
+    args = ap.parse_args()
+    if args.demo:
+        enable_demo()
     elif not os.path.exists(CHAT_DB):
         print(f"chat.db not found at {CHAT_DB} — is Messages set up on this Mac?")
-        sys.exit(1)
+        # don't exit — let the UI show onboarding instead of dying
     url = f"http://127.0.0.1:{args.port}"
     print(f"iMessage Export & Analyze → {url}" + ("   [DEMO MODE]" if DEMO else ""))
     if not DEMO:

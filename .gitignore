@@ -13,6 +13,9 @@ venv/
 build/
 DerivedData/
 *.dmg
+# Generated icon artifacts (produced by macos-app/build.sh from make-icon.swift)
+AppIcon.icns
+AppIcon.iconset/
 
 # Editors / local tooling
 .vscode/
