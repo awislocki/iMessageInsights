@@ -19,6 +19,24 @@ cd macos-app
 
 This produces **`iMessage Insights.app`** in this folder.
 
+## Build a `.dmg` installer
+
+```bash
+cd macos-app
+./make-dmg.sh
+```
+
+Produces **`iMessageInsights.dmg`** (drag-to-Applications). This is what's attached to
+GitHub Releases.
+
+> The app is **ad-hoc signed** (no Apple Developer ID), so a downloaded copy is
+> quarantined by macOS. Clear it once after installing:
+> ```bash
+> xattr -cr "/Applications/iMessage Insights.app"
+> ```
+> (or right-click the app → Open). Proper Developer ID signing + notarization removes
+> this step — see *Distributing to other people* below.
+
 ## Install / run
 
 1. `open "iMessage Insights.app"` (or double-click it). A 💬 icon appears in the menu bar.
