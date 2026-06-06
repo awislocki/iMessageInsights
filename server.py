@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 iMessage Export & Analyze — a local web tool to browse Apple Messages threads,
-get Claude-powered relationship insights, and export them as AI-optimized
+get AI-powered relationship insights, and export them as AI-optimized
 Markdown, encrypted Markdown, or PDF.
 
 Stdlib only. Reads ~/Library/Messages/chat.db READ-ONLY.
@@ -818,14 +818,14 @@ def call_claude(system, user_text, max_tokens=1800):
             detail = json.loads(detail).get("error", {}).get("message", detail)
         except Exception:
             pass
-        raise RuntimeError(f"Claude API error ({e.code}): {detail}")
+        raise RuntimeError(f"AI API error ({e.code}): {detail}")
     return "".join(b.get("text", "") for b in resp.get("content", []))
 
 
 def extract_json(raw):
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
-        raise RuntimeError("Claude did not return JSON.")
+        raise RuntimeError("The AI did not return JSON.")
     return json.loads(m.group(0))
 
 
@@ -1494,7 +1494,7 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <div class="modal" id="ctxModal">
   <div class="sheet">
     <h3>Relationship context</h3>
-    <div class="hint">Background Claude can't see in the messages — history, breakup details,
+    <div class="hint">Background the AI can't see in the messages — history, breakup details,
       what you want, the tone. <b>One point per line.</b> Encrypted with your vault password.</div>
     <textarea id="ctxEdit" rows="9" style="margin-top:10px"
       placeholder="e.g.&#10;Dated 2021–2023, ended over distance&#10;Stay friendly but don't reopen the relationship&#10;Avoid bringing up the move"></textarea>
@@ -1867,7 +1867,7 @@ async function ask(){
 async function analyze(force){     // historical insight: cached; this button generates fresh
   if(!current) return;
   if(!await confirmCost('insights')) return;
-  const ib=document.getElementById('ibody'); ib.innerHTML=spinner('Claude is reading the conversation…');
+  const ib=document.getElementById('ibody'); ib.innerHTML=spinner('Reading the conversation…');
   const r=await fetch('/api/insights',{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({id:current, range:curRange, force:true})});
   const d=await r.json();

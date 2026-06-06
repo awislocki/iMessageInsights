@@ -1,7 +1,7 @@
 # iMessage Export & Analyze
 
 A **local, private** web tool to browse your Apple Messages threads, get
-Claude-powered relationship insights, and export them as AI-optimized Markdown,
+AI-powered relationship insights, and export them as AI-optimized Markdown,
 **encrypted** Markdown, or PDF.
 
 Everything runs on `127.0.0.1`. The Messages database is opened **read-only**.
@@ -20,7 +20,7 @@ _All data below is fictional, captured from `python3 server.py --demo`._
 - Resolves contact **names** from your Address Book (best effort)
 - **Realtime / always up to date** — reads the live DB on every load; a `live`
   toggle auto-refreshes the thread list and open conversation every 8s
-- **AI Insights (Claude)** per conversation: summary, tone, relationship health,
+- **AI Insights** per conversation: summary, tone, relationship health,
   the other person's communication style, key topics, open threads, **watch-outs**,
   and **suggested replies tailored to the relationship type you assign**
 - **Contact photos** pulled from your Address Book where available, with a
@@ -80,7 +80,7 @@ Opens <http://127.0.0.1:8765>.
    vault is locked it stays in memory for the session only. You can also preload
    it: `ANTHROPIC_API_KEY=sk-... python3 server.py`.)
 2. Open a conversation, pick a **relationship type** from the dropdown.
-3. Click **Analyze**. Claude reads the recent transcript and returns insights +
+3. Click **Analyze**. The AI reads the recent transcript and returns insights +
    reply strategies in the right panel. Click **copy** on any suggested reply.
 
 Models (in Settings): `claude-sonnet-4-6` (default, fast/cheap),
@@ -110,7 +110,7 @@ The cost-confirm shows the estimate for that scope before each call.
 
 ### Ask saved questions
 
-Type a question in the **❓ Ask** box to ask Claude about the messages in view.
+Type a question in the **❓ Ask** box to ask the AI about the messages in view.
 Each question and answer is **saved (encrypted) in the vault** and listed under
 **💬 Saved Q&A** on the thread — re-open any time for free.
 
