@@ -7,6 +7,12 @@ Claude-powered relationship insights, and export them as AI-optimized Markdown,
 Everything runs on `127.0.0.1`. The Messages database is opened **read-only**.
 Your messages and API key never leave your machine.
 
+## Screenshots
+
+_All data below is fictional, captured from `python3 server.py --demo`._
+
+![Overview — threads, conversation, and AI insights](screenshots/overview.png)
+
 ## Features
 
 - **All conversations**, grouped by contact/group, **ordered by most recent**
@@ -44,12 +50,24 @@ Your messages and API key never leave your machine.
 2. Enable your terminal (**Terminal** or **iTerm**)
 3. **Fully quit** it (⌘Q) and reopen
 
-## Run
+## Try it instantly (demo mode)
+
+No Mac/Messages/API key required — runs on fictional data:
+
+```bash
+python3 server.py --demo
+```
+
+Demo mode serves a handful of made-up conversations with canned AI results, so you
+can explore the whole UI (and take screenshots) without Full Disk Access, a real
+database, an API key, or a vault. Great for trying the tool or contributing.
+
+## Run (real data)
 
 ```bash
 cd imessage-export
 python3 server.py
-# options: --port 9000   --no-browser
+# options: --port 9000   --no-browser   --demo
 ```
 
 Opens <http://127.0.0.1:8765>.

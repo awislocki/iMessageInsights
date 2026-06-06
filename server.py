@@ -49,6 +49,12 @@ RELATIONSHIP_TYPES = [
     "Professional / Colleague", "Client / Business", "Acquaintance", "Other",
 ]
 
+# Demo mode (--demo): serve fictional data so the UI can be shown/screenshotted
+# without Full Disk Access, a real database, an API key, or a vault. Set in main().
+DEMO = False
+_DEMO_REL = {}
+_DEMO_QA = {}
+
 # ---------------------------------------------------------------------------
 # Database access
 # ---------------------------------------------------------------------------
@@ -285,6 +291,8 @@ def _vault_decrypt(blob, pw):
 
 def vault_status():
     """exists: an encrypted vault file is present. unlocked: we can read it."""
+    if DEMO:
+        return {"exists": False, "unlocked": True, "legacy_plaintext": False}
     legacy = os.path.exists(REL_FILE)
     return {"exists": os.path.exists(REL_ENC_FILE) or legacy,
             "unlocked": _REL_CACHE is not None,
@@ -347,6 +355,9 @@ def _vault_write():
 
 
 def save_relationship(chat_id, rel_type, notes):
+    if DEMO:
+        _DEMO_REL[str(chat_id)] = {"type": rel_type, "notes": notes or ""}
+        return
     if _REL_CACHE is None:
         raise RuntimeError("Vault is locked. Set/enter your vault password in Settings (⚙) "
                            "to save encrypted relationship notes.")
@@ -399,12 +410,17 @@ def persist_settings():
 
 
 def get_qa(chat_id):
+    if DEMO:
+        return _DEMO_QA.get(str(chat_id), [])
     return _AI_CACHE.get(str(chat_id), {}).get("qa", [])
 
 
 def add_qa(chat_id, question, answer, rng):
     item = {"q": question, "a": answer, "range": rng,
             "at": fmt_dt(datetime.datetime.now())}
+    if DEMO:
+        _DEMO_QA.setdefault(str(chat_id), []).append(item)
+        return item
     _AI_CACHE.setdefault(str(chat_id), {}).setdefault("qa", []).append(item)
     if _REL_CACHE is not None and SETTINGS.get("vault_pw"):
         _REL_CACHE.setdefault("_ai", {}).setdefault(str(chat_id), {}) \
@@ -549,6 +565,8 @@ def get_imported_thread(impid, since_ns=None):
 
 def fetch_thread(idv, since_ns=None):
     """Dispatch to an imported conversation or a real Messages thread."""
+    if DEMO:
+        return _demo_get(idv)
     s = str(idv)
     return get_imported_thread(s, since_ns) if s.startswith("imp:") \
         else get_thread(int(s), since_ns)
@@ -559,6 +577,8 @@ def fetch_thread(idv, since_ns=None):
 # ---------------------------------------------------------------------------
 
 def list_threads():
+    if DEMO:
+        return _demo_list()
     con = open_db()
     try:
         rows = con.execute("""
@@ -832,6 +852,8 @@ Provide 3 suggested_replies with distinct strategies suited to the relationship 
 
 
 def build_insights(thread):
+    if DEMO:
+        return DEMO_INSIGHT
     msgs = thread["messages"][-220:]
     transcript = "\n".join(f"[{m['timestamp']}] {m['sender']}: {m['text']}" for m in msgs)
     transcript = transcript[:42000]
@@ -883,6 +905,8 @@ def _assist_context(thread, tail):
 
 
 def build_reply(thread, instruction):
+    if DEMO:
+        return DEMO_REPLY
     user = _assist_context(thread, 80)
     if instruction and instruction.strip():
         user += f"\n\nWhat the user wants to convey / the vibe: {instruction.strip()}"
@@ -891,6 +915,8 @@ def build_reply(thread, instruction):
 
 
 def build_critique(thread):
+    if DEMO:
+        return DEMO_CRITIQUE
     user = _assist_context(thread, 60) + "\n\nCritique the user's own recent messages."
     return extract_json(call_claude(CRITIQUE_SYSTEM, user, 1400))
 
@@ -903,6 +929,12 @@ the user's context notes into account. Keep the answer focused and useful."""
 
 
 def build_answer(thread, question):
+    if DEMO:
+        return ("(demo answer) Based on the messages in view, here's what stands out for "
+                f"“{question}”: the exchange is friendly and low-pressure, with a "
+                "light nostalgic undertone. Nothing here is explicitly romantic, and the "
+                "open-ended coffee suggestion keeps things casual. Connect a real API key to "
+                "get answers grounded in your actual conversation.")
     msgs = thread["messages"][-300:]
     transcript = "\n".join(f"[{m['timestamp']}] {m['sender']}: {m['text']}" for m in msgs)[:42000]
     rel = thread.get("relationship", {})
@@ -922,6 +954,9 @@ PRICES = {
 
 
 def estimate_cost(thread, kind):
+    if DEMO:
+        return {"model": SETTINGS["model"], "input_tokens": 1180,
+                "output_tokens": 1800, "cost_usd": 0.0121}
     # (messages used, char cap, max output tokens, system-prompt token allowance)
     n, cap, out, sys_tok = {
         "insights": (220, 42000, 1800, 700),
@@ -1900,19 +1935,118 @@ boot();
 </script></body></html>"""
 
 
+# ---------------------------------------------------------------------------
+# Demo data (used only when --demo is passed). Entirely fictional.
+# ---------------------------------------------------------------------------
+
+def _demo_threads():
+    def th(i, title, rel, notes, msgs):
+        return {"id": i, "title": title, "rel": rel, "notes": notes,
+                "messages": [{"timestamp": t, "is_from_me": m, "text": x} for (t, m, x) in msgs]}
+    return [
+        th("d1", "Alex Rivera", "Ex / Former Partner",
+           "Dated 2021-2023, ended over distance. Keep it friendly - no mixed signals.", [
+            ("2026-06-04 18:22", False, "Hey - saw the reunion photos, looked fun!"),
+            ("2026-06-04 18:40", True,  "It was! Wish you'd been there."),
+            ("2026-06-04 18:41", False, "Next time for sure. How have you been?"),
+            ("2026-06-05 09:10", True,  "Good - busy with the new role. You?"),
+            ("2026-06-05 09:16", False, "Same. We should grab coffee sometime, no pressure :)")]),
+        th("d2", "Mom", "Family", "", [
+            ("2026-06-05 07:30", False, "Don't forget Dad's birthday Sunday!"),
+            ("2026-06-05 07:45", True,  "Already wrapped the gift"),
+            ("2026-06-05 07:46", False, "You're the best. Love you")]),
+        th("d3", "Jordan (Design)", "Professional / Colleague", "", [
+            ("2026-06-05 11:02", False, "Can you review the mockups before standup?"),
+            ("2026-06-05 11:20", True,  "On it - comments in by noon.")]),
+        th("d4", "Sam Chen", "Close Friend", "", [
+            ("2026-06-03 20:10", False, "Trivia night Thursday?"),
+            ("2026-06-03 20:12", True,  "Always. Our streak is on the line")]),
+        th("d5", "Taylor", "Romantic / Partner", "Anniversary is the 20th.", [
+            ("2026-06-05 12:00", False, "Thinking about you"),
+            ("2026-06-05 12:05", True,  "Dinner tonight? I'll cook."),
+            ("2026-06-05 12:06", False, "Yes please.")]),
+    ]
+
+
+def _demo_list():
+    out = []
+    for t in _demo_threads():
+        m = t["messages"]
+        out.append({"id": t["id"], "title": t["title"], "is_group": False, "img": None,
+                    "participants": [t["title"]], "last_date": m[-1]["timestamp"],
+                    "last_raw": m[-1]["timestamp"], "msg_count": len(m),
+                    "relationship": _DEMO_REL.get(t["id"], {}).get("type", t["rel"])})
+    out.sort(key=lambda x: x["last_date"], reverse=True)
+    return out
+
+
+def _demo_get(idv):
+    for t in _demo_threads():
+        if t["id"] == str(idv):
+            rel = _DEMO_REL.get(t["id"], {"type": t["rel"], "notes": t["notes"]})
+            msgs = [{**mm, "sender": "Me" if mm["is_from_me"] else t["title"], "img": None}
+                    for mm in t["messages"]]
+            return {"id": t["id"], "title": t["title"], "is_group": False, "imported": False,
+                    "img": None, "participants": [t["title"]], "relationship": rel,
+                    "messages": msgs}
+    return None
+
+
+DEMO_INSIGHT = {
+    "summary": "A warm, lightly nostalgic check-in. Alex is re-initiating friendly contact "
+               "after the reunion; you're receptive but measured.",
+    "tone": "warm, light, a little nostalgic",
+    "relationship_health": "Amicable post-breakup, on friendly footing with a hint of lingering closeness.",
+    "their_style": "Casual, initiates easily, low-pressure, uses light emoji.",
+    "key_topics": ["reunion", "catching up", "new job", "coffee"],
+    "open_threads": ["Coffee suggested but not yet scheduled"],
+    "suggested_replies": [
+        {"strategy": "Warm but boundaried", "when": "Stay friendly without mixed signals",
+         "example": "Coffee sounds nice - maybe next week? Keeping it easy."},
+        {"strategy": "Light deflect", "when": "If you'd rather not meet up yet",
+         "example": "Things are hectic right now, but glad you're doing well!"},
+        {"strategy": "Direct + kind", "when": "To be clear about boundaries",
+         "example": "I'd be up for coffee as friends - just want to keep it in that lane."}],
+    "watch_outs": ["Avoid over-promising plans", "Mind the nostalgic tone given the relationship type"]}
+DEMO_REPLY = {"replies": [
+    {"tone": "Warm & brief", "text": "Coffee sounds good - maybe next week? :)"},
+    {"tone": "Friendly + clear", "text": "Would be nice to catch up as friends. Let's find a time."},
+    {"tone": "Low-key", "text": "Glad you're doing well! Things are busy but let's see."}],
+    "tips": ["Keep it short to match the easy tone", "No need to reply instantly"]}
+DEMO_CRITIQUE = {
+    "overall": "You're warm and concise, which lands well here.",
+    "strengths": ["Friendly without overcommitting", "Good emoji balance"],
+    "improvements": ["Could be a touch clearer about intent to avoid mixed signals"],
+    "rewrites": [{"original": "Same. We should grab coffee sometime, no pressure :)",
+                  "better": "Good to hear from you! Coffee as friends sometime would be nice - no rush."}]}
+
+
 def main():
+    global DEMO
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--demo", action="store_true",
+                    help="serve fictional demo data (no DB / key / vault needed)")
     args = ap.parse_args()
-    if not os.path.exists(CHAT_DB):
+    if args.demo:
+        DEMO = True
+        SETTINGS["api_key"] = "demo-mode"
+        for t in _demo_threads():
+            _DEMO_REL[t["id"]] = {"type": t["rel"], "notes": t["notes"]}
+        _DEMO_QA["d1"] = [{"q": "Is Alex trying to rekindle things?",
+            "a": "The tone is friendly and a little nostalgic, but nothing here is explicitly "
+                 "romantic - it reads as a genuine, low-pressure reconnection. The 'no pressure' "
+                 "coffee suggestion keeps it open-ended. Given you've classified this as an ex, "
+                 "watch for mixed signals, but there's no clear push to rekindle.",
+            "range": "month", "at": "2026-06-05 09:25:00"}]
+    elif not os.path.exists(CHAT_DB):
         print(f"chat.db not found at {CHAT_DB} — is Messages set up on this Mac?")
         sys.exit(1)
     url = f"http://127.0.0.1:{args.port}"
-    print(f"iMessage Export & Analyze → {url}")
-    print("If threads don't load, grant Full Disk Access to your terminal (see README).")
-    if SETTINGS["api_key"]:
-        print("Anthropic API key loaded from environment.")
+    print(f"iMessage Export & Analyze → {url}" + ("   [DEMO MODE]" if DEMO else ""))
+    if not DEMO:
+        print("If threads don't load, grant Full Disk Access to your terminal (see README).")
     if not args.no_browser:
         try: webbrowser.open(url)
         except Exception: pass
