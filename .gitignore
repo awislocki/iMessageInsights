@@ -8,6 +8,12 @@ venv/
 # macOS
 .DS_Store
 
+# Built app bundles / Xcode artifacts
+*.app/
+build/
+DerivedData/
+*.dmg
+
 # Editors / local tooling
 .vscode/
 .idea/
