@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Built app bundles / Xcode artifacts
+*.app/
+build/
+DerivedData/
+*.dmg
+# Generated icon artifacts (produced by macos-app/build.sh from make-icon.swift)
+AppIcon.icns
+AppIcon.iconset/
+
+# Editors / local tooling
+.vscode/
+.idea/
+.claude/
+
+# Local data this tool creates (these live in $HOME, not the repo —
+# listed defensively so they can never be committed by accident)
+*.enc
+*.enc.bak
+relationships.json
+.imessage-export/
+
+# Secrets / environment
+.env
+*.key
