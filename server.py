@@ -19,10 +19,14 @@ import re
 import sys
 import json
 import html
+import time
+import shutil
 import zipfile
 import sqlite3
 import argparse
 import datetime
+import tempfile
+import threading
 import subprocess
 import urllib.request
 import urllib.error
@@ -59,8 +63,47 @@ _DEMO_QA = {}
 # Database access
 # ---------------------------------------------------------------------------
 
+# A live chat.db is in WAL mode and Messages.app writes to it constantly, which
+# causes intermittent "unable to open database file" and can hide messages still in
+# the -wal file. We read from a COPY (db + -wal + -shm) so reads are stable and
+# complete. The copy is refreshed when the source changes (rate-limited).
+_SNAP = {"path": None, "mtime": 0.0, "ts": 0.0}
+_SNAP_LOCK = threading.Lock()
+_SNAP_MIN_INTERVAL = 20.0   # seconds between re-copies during live use
+
+
+def _db_snapshot():
+    """Path to a fresh, complete, lock-free copy of chat.db. Falls back to live file."""
+    try:
+        src_mtime = os.path.getmtime(CHAT_DB)
+    except OSError:
+        return CHAT_DB
+    with _SNAP_LOCK:
+        now = time.time()
+        have = _SNAP["path"] and os.path.exists(_SNAP["path"])
+        stale = src_mtime != _SNAP["mtime"] and (now - _SNAP["ts"]) > _SNAP_MIN_INTERVAL
+        if not have or stale:
+            try:
+                d = tempfile.mkdtemp(prefix="imsg-snap-")
+                dst = os.path.join(d, "chat.db")
+                for suf in ("", "-wal", "-shm"):
+                    if os.path.exists(CHAT_DB + suf):
+                        shutil.copy2(CHAT_DB + suf, dst + suf)
+                old = _SNAP["path"]
+                _SNAP.update(path=dst, mtime=src_mtime, ts=now)
+                if old and os.path.exists(old):
+                    shutil.rmtree(os.path.dirname(old), ignore_errors=True)
+            except Exception:
+                return CHAT_DB
+        return _SNAP["path"]
+
+
 def open_db():
-    con = sqlite3.connect(f"file:{CHAT_DB}?mode=ro&immutable=1", uri=True, timeout=5)
+    path = _db_snapshot()
+    if path != CHAT_DB:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)  # our own copy
+    else:                                                                    # fallback
+        con = sqlite3.connect(f"file:{CHAT_DB}?mode=ro&immutable=1", uri=True, timeout=5)
     con.row_factory = sqlite3.Row
     return con
 
@@ -572,6 +615,115 @@ def fetch_thread(idv, since_ns=None):
         else get_thread(int(s), since_ns)
 
 
+def _person_handle_rowids(con, primary):
+    """All handle ROWIDs for one person: same number/email, or same contact name
+    (so a person split across phone + iCloud email is unified)."""
+    target = normalize_handle(primary)
+    name = contacts().get(target)
+    ids = []
+    for r in con.execute("SELECT ROWID, id FROM handle"):
+        nh = normalize_handle(r["id"])
+        if nh == target or (name and contacts().get(nh) == name):
+            ids.append(r["ROWID"])
+    return ids
+
+
+def person_full_history(chat_id):
+    """Every 1:1 message with a person, merged across ALL their chat threads/handles."""
+    con = open_db()
+    try:
+        crow = con.execute("SELECT chat_identifier, display_name, style FROM chat WHERE ROWID=?",
+                           (chat_id,)).fetchone()
+        if not crow:
+            return None
+        handles = [r["handle"] for r in con.execute(
+            "SELECT h.id AS handle FROM chat_handle_join chj JOIN handle h ON h.ROWID=chj.handle_id "
+            "WHERE chj.chat_id=?", (chat_id,))]
+        # Group chats: don't aggregate (would mix in other people) — return that chat.
+        if crow["style"] == 43 or len(handles) > 1:
+            t = get_thread(chat_id)
+            return {"title": t["title"], "is_group": True, "participants": t["participants"],
+                    "relationship": t["relationship"], "messages": t["messages"],
+                    "chat_count": 1} if t else None
+        primary = handles[0] if handles else crow["chat_identifier"]
+        title = crow["display_name"] or display_for_handle(primary)
+        hids = _person_handle_rowids(con, primary)
+        if hids:
+            qm = ",".join("?" * len(hids))
+            chat_ids = [row[0] for row in con.execute(
+                f"""SELECT DISTINCT chj.chat_id FROM chat_handle_join chj
+                    WHERE chj.handle_id IN ({qm}) AND chj.chat_id IN
+                      (SELECT chat_id FROM chat_handle_join GROUP BY chat_id HAVING COUNT(*)=1)""",
+                hids).fetchall()]
+        else:
+            chat_ids = []
+        if not chat_ids:
+            chat_ids = [chat_id]
+        cm = ",".join("?" * len(chat_ids))
+        rows = con.execute(f"""
+            SELECT m.ROWID AS id, m.date, m.is_from_me, m.text, m.attributedBody,
+                   m.cache_has_attachments, m.service
+            FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
+            WHERE cmj.chat_id IN ({cm}) ORDER BY m.date ASC""", chat_ids).fetchall()
+        seen, messages = set(), []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            txt = message_text(r)
+            if not txt and r["cache_has_attachments"]:
+                txt = "[attachment]"
+            if not txt:
+                continue
+            messages.append({"timestamp": fmt_dt(apple_time_to_dt(r["date"])),
+                             "is_from_me": bool(r["is_from_me"]),
+                             "sender": "Me" if r["is_from_me"] else title,
+                             "text": txt, "service": r["service"]})
+        return {"title": title, "is_group": False, "participants": [title],
+                "relationship": relationship_for(chat_id), "messages": messages,
+                "chat_count": len(chat_ids)}
+    finally:
+        con.close()
+
+
+def person_zip(idv):
+    """Build a .zip of a person's COMPLETE history (.md + .txt + .json). Returns (name, bytes)."""
+    s = str(idv)
+    if DEMO:
+        t = _demo_get(s)
+        if not t:
+            return None
+        title, msgs, chats, rel = t["title"], t["messages"], 1, t["relationship"]
+    elif s.startswith("imp:"):
+        t = get_imported_thread(s)
+        if not t:
+            return None
+        title, msgs, chats, rel = t["title"], t["messages"], 1, t["relationship"]
+    else:
+        ph = person_full_history(int(s))
+        if not ph:
+            return None
+        title, msgs, chats, rel = ph["title"], ph["messages"], ph["chat_count"], ph["relationship"]
+    thread = {"title": title, "is_group": False, "participants": [title],
+              "relationship": rel, "messages": msgs}
+    base = slugify(title)
+    md = thread_to_markdown(thread)
+    txt = "\n".join(f"[{m['timestamp']}] {m['sender']}: {m['text']}" for m in msgs)
+    js = json.dumps({"title": title, "merged_chat_threads": chats,
+                     "message_count": len(msgs), "messages": msgs}, indent=2)
+    note = (f"All messages with {title}.\n{len(msgs)} messages"
+            + (f", merged from {chats} chat threads.\n" if chats > 1 else ".\n")
+            + "Files: .md (AI-ready), .txt (plain), .json (structured).\n"
+              "Generated by iMessage Insights.\n")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{base}.md", md)
+        z.writestr(f"{base}.txt", txt)
+        z.writestr(f"{base}.json", js)
+        z.writestr("README.txt", note)
+    return base, buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Queries
 # ---------------------------------------------------------------------------
@@ -1072,6 +1224,12 @@ class Handler(BaseHTTPRequestHandler):
                 t = fetch_thread(qs["id"][0])
                 if not t: return self._json({"error": "not found"}, 404)
                 return self._send(200, thread_to_print_html(t))
+            if u.path == "/export/person-zip":
+                res = person_zip(qs["id"][0])
+                if not res: return self._json({"error": "not found"}, 404)
+                base, data = res
+                return self._send(200, data, "application/zip",
+                    {"Content-Disposition": f'attachment; filename="{base}_all_messages.zip"'})
             return self._send(404, "Not found")
         except sqlite3.OperationalError as e:
             return self._access_error(e)
@@ -1384,6 +1542,7 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     <h1 id="title">Select a conversation</h1>
     <select id="relSel" style="display:none" onchange="saveRel()"></select>
     <button id="btnMd" style="display:none" onclick="exportMd()">⬇︎ .md</button>
+    <button id="btnZip" style="display:none" onclick="exportZip()" title="Every message with this person, merged across all their chat threads">⬇︎ All (ZIP)</button>
     <button id="btnPdf" style="display:none" onclick="exportPdf()">🖨 PDF</button>
   </div>
   <div id="loadbar" class="loadinfo" style="display:none">
@@ -1659,7 +1818,7 @@ function render(){
 async function openThread(id){
   current=id; render(); lastSig="";
   curRange = String(id).startsWith('imp:') ? 'all' : 'month';   // imported = historical
-  ['btnMd','btnPdf'].forEach(b=>document.getElementById(b).style.display='');
+  ['btnMd','btnZip','btnPdf'].forEach(b=>document.getElementById(b).style.display='');
   document.getElementById('icontrols').style.display='block';
   document.getElementById('loadbar').style.display='flex';
   document.getElementById('ibody').innerHTML='<div id="iempty">Add context, then '+
@@ -1947,6 +2106,8 @@ function renderInsights(d){
 function copyTxt(el,i){ navigator.clipboard.writeText(COPY[i]||''); el.textContent='copied'; }
 
 function exportMd(){ if(current) location.href='/export/md?id='+current; }
+function exportZip(){ if(current){ toast('Building ZIP — merging all their chats…');
+  location.href='/export/person-zip?id='+current; } }
 function exportPdf(){ if(current) window.open('/export/print?id='+current,'_blank'); }
 function exportAll(){ location.href='/export/all'; }
 
