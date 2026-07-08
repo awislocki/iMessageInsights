@@ -51,21 +51,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return FileManager.default.fileExists(atPath: dev) ? dev : nil
     }
 
-    func pythonPath() -> String {
-        for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
-            if FileManager.default.isExecutableFile(atPath: p) { return p }
+    /// Environment for the python child. DEVELOPER_DIR points the /usr/bin shims at
+    /// the Command Line Tools so an unaccepted full-Xcode license can't break them.
+    func childEnv() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        if FileManager.default.fileExists(atPath: "/Library/Developer/CommandLineTools") {
+            env["DEVELOPER_DIR"] = "/Library/Developer/CommandLineTools"
         }
-        return "/usr/bin/python3"
+        return env
+    }
+
+    /// First python3 that actually RUNS (not just exists) — /usr/bin/python3 is a shim
+    /// that can fail (e.g. Xcode license not accepted) even though it's executable.
+    func pythonPath() -> String? {
+        for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
+            guard FileManager.default.isExecutableFile(atPath: p) else { continue }
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: p)
+            t.arguments = ["-c", "pass"]
+            t.environment = childEnv()
+            t.standardOutput = FileHandle.nullDevice
+            t.standardError = FileHandle.nullDevice
+            do { try t.run(); t.waitUntilExit(); if t.terminationStatus == 0 { return p } }
+            catch { continue }
+        }
+        return nil
     }
 
     func startServer() {
         guard let script = serverScript() else { alert("Could not find server.py in the app bundle."); return }
+        guard let python = pythonPath() else {
+            alert("No working python3 found. Install the Apple Command Line Tools "
+                + "(xcode-select --install) or Homebrew Python, then relaunch.")
+            return
+        }
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: pythonPath())
+        p.executableURL = URL(fileURLWithPath: python)
         var args = [script, "--no-browser", "--port", String(port)]
         if demo { args.append("--demo") }
         p.arguments = args
+        p.environment = childEnv()
         p.currentDirectoryURL = URL(fileURLWithPath: (script as NSString).deletingLastPathComponent)
+        p.terminationHandler = { [weak self] proc in
+            guard let self = self, proc == self.server else { return }  // ignore our own restarts
+            self.server = nil
+            DispatchQueue.main.async {
+                self.alert("The background server stopped unexpectedly "
+                    + "(exit \(proc.terminationStatus)). Use the menu-bar icon to reopen, "
+                    + "or check that python3 works in Terminal.")
+            }
+        }
         do { try p.run(); server = p } catch { alert("Failed to start server: \(error.localizedDescription)") }
     }
 
