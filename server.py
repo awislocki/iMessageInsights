@@ -1233,6 +1233,26 @@ def slugify(s):
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", s or "thread").strip("_")[:60] or "thread"
 
 
+def save_to_downloads(name, data):
+    """Write an export into ~/Downloads (collision-safe) and reveal it in Finder.
+    Used instead of browser downloads: the menu-bar app's WKWebView silently drops
+    navigation downloads, and for a localhost tool 'file appears in Downloads' is
+    the smoother UX everywhere."""
+    ddir = os.path.join(HOME, "Downloads")
+    base, ext = os.path.splitext(name)
+    path, i = os.path.join(ddir, name), 2
+    while os.path.exists(path):
+        path = os.path.join(ddir, f"{base}-{i}{ext}")
+        i += 1
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    try:
+        subprocess.Popen(["open", "-R", path])   # reveal in Finder
+    except Exception:
+        pass
+    return path
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1311,31 +1331,45 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, b"", "text/plain")
                 ctype = "image/png" if img[:8] == _PNG else "image/jpeg"
                 return self._send(200, img, ctype, {"Cache-Control": "max-age=3600"})
+            want_save = qs.get("save", ["0"])[0] == "1"
+
+            def deliver(fn, data, ctype):
+                if want_save:
+                    path = save_to_downloads(fn, data)
+                    return self._json({"ok": True, "file": os.path.basename(path),
+                                       "path": path})
+                return self._send(200, data, ctype,
+                                  {"Content-Disposition": f'attachment; filename="{fn}"'})
+
             if u.path == "/export/md":
                 t = fetch_thread(qs["id"][0])
                 if not t: return self._json({"error": "not found"}, 404)
-                fn = slugify(t["title"]) + ".md"
-                return self._send(200, thread_to_markdown(t), "text/markdown; charset=utf-8",
-                                  {"Content-Disposition": f'attachment; filename="{fn}"'})
+                return deliver(slugify(t["title"]) + ".md", thread_to_markdown(t),
+                               "text/markdown; charset=utf-8")
             if u.path == "/export/all":
-                return self._send(200, all_threads_markdown(), "text/markdown; charset=utf-8",
-                                  {"Content-Disposition": 'attachment; filename="imessages_all.md"'})
+                return deliver("imessages_all.md", all_threads_markdown(),
+                               "text/markdown; charset=utf-8")
             if u.path == "/export/print":
                 t = fetch_thread(qs["id"][0])
                 if not t: return self._json({"error": "not found"}, 404)
                 return self._send(200, thread_to_print_html(t))
+            if u.path == "/api/print-open":
+                # Open the print view in the DEFAULT BROWSER — window.open() is a
+                # no-op inside the menu-bar app's WKWebView.
+                url = (f"http://127.0.0.1:{SETTINGS.get('port', 8765)}"
+                       f"/export/print?id={quote(qs['id'][0])}")
+                subprocess.Popen(["open", url])
+                return self._json({"ok": True})
             if u.path == "/export/person-zip":
                 res = person_zip(qs["id"][0])
                 if not res: return self._json({"error": "not found"}, 404)
                 base, data = res
-                return self._send(200, data, "application/zip",
-                    {"Content-Disposition": f'attachment; filename="{base}_all_messages.zip"'})
+                return deliver(f"{base}_all_messages.zip", data, "application/zip")
             if u.path == "/export/person-ai":
                 res = person_ai_zip(qs["id"][0])
                 if not res: return self._json({"error": "not found"}, 404)
                 base, data = res
-                return self._send(200, data, "application/zip",
-                    {"Content-Disposition": f'attachment; filename="{base}_for_AI.zip"'})
+                return deliver(f"{base}_for_AI.zip", data, "application/zip")
             return self._send(404, "Not found")
         except sqlite3.OperationalError as e:
             return self._access_error(e)
@@ -1419,6 +1453,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "Vault is locked. Unlock it (🔒) first — the "
                                        "archive is encrypted with your vault password."}, 400)
                 cipher = encrypt_bytes(all_threads_zip(), SETTINGS["vault_pw"])
+                if data.get("save"):
+                    path = save_to_downloads("imessages_all.zip.enc", cipher)
+                    return self._json({"ok": True, "file": os.path.basename(path), "path": path})
                 return self._send(200, cipher, "application/octet-stream",
                     {"Content-Disposition": 'attachment; filename="imessages_all.zip.enc"'})
             return self._send(404, "Not found")
@@ -2203,25 +2240,33 @@ function renderInsights(d){
 
 function copyTxt(el,i){ navigator.clipboard.writeText(COPY[i]||''); el.textContent='copied'; }
 
-function exportMd(){ if(current) location.href='/export/md?id='+current; }
-function exportZip(){ if(current){ toast('Building ZIP — merging all their chats…');
-  location.href='/export/person-zip?id='+current; } }
-function exportAI(){ if(current){ toast('Building AI export — full history, chunked…');
-  location.href='/export/person-ai?id='+current; } }
-function exportPdf(){ if(current) window.open('/export/print?id='+current,'_blank'); }
-function exportAll(){ location.href='/export/all'; }
+// Exports save straight into ~/Downloads (and pop a Finder window on the file).
+// Browser-style downloads are a silent no-op inside the menu-bar app's WKWebView.
+async function saveExport(url, workingMsg){
+  toast(workingMsg||'Exporting…');
+  const r=await fetch(url);
+  const d=await r.json().catch(()=>({error:'unexpected response'}));
+  if(!r.ok || d.error){ alert('Export failed: '+(d.error||'')); return; }
+  toast('Saved to Downloads: '+d.file);
+}
+function exportMd(){ if(current) saveExport('/export/md?id='+current+'&save=1'); }
+function exportZip(){ if(current) saveExport('/export/person-zip?id='+current+'&save=1',
+  'Building ZIP — merging all their chats…'); }
+function exportAI(){ if(current) saveExport('/export/person-ai?id='+current+'&save=1',
+  'Building AI export — full history, chunked…'); }
+function exportPdf(){ if(current) fetch('/api/print-open?id='+current); }
+function exportAll(){ saveExport('/export/all?save=1','Exporting all conversations…'); }
 
 async function encryptArchive(){
   let st=await (await fetch('/api/vault')).json();
   if(!st.unlocked){ if(!await ensureVault()) return; }
+  toast('Encrypting all conversations…');
   const r=await fetch('/export/encrypted-archive',{method:'POST',
-    headers:{'content-type':'application/json'},body:'{}'});
-  if(!r.ok){ const e=await r.json().catch(()=>({error:'failed'}));
-    alert('Encrypt failed: '+(e.error||'')); return; }
-  const blob=await r.blob(); const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob); a.download='imessages_all.zip.enc'; a.click();
-  alert('All conversations encrypted into one archive (imessages_all.zip.enc).\n\n'+
-    'Decrypt later:\n  openssl enc -d -aes-256-cbc -pbkdf2 -in imessages_all.zip.enc -out all.zip\n'+
+    headers:{'content-type':'application/json'},body:JSON.stringify({save:true})});
+  const d=await r.json().catch(()=>({error:'failed'}));
+  if(!r.ok || d.error){ alert('Encrypt failed: '+(d.error||'')); return; }
+  alert('Encrypted archive saved to Downloads: '+d.file+'\n\n'+
+    'Decrypt later:\n  openssl enc -d -aes-256-cbc -pbkdf2 -in '+d.file+' -out all.zip\n'+
     '  unzip all.zip');
 }
 
@@ -2394,6 +2439,7 @@ def main():
     ap.add_argument("--demo", action="store_true",
                     help="serve fictional demo data (no DB / key / vault needed)")
     args = ap.parse_args()
+    SETTINGS["port"] = args.port
     if args.demo:
         enable_demo()
     elif not os.path.exists(CHAT_DB):
