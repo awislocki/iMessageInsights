@@ -111,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func buildWindow() {
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1240, height: 820),
                             configuration: WKWebViewConfiguration())
+        webView.uiDelegate = self   // route JS alert/confirm/prompt to native dialogs
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
@@ -149,6 +150,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func alert(_ msg: String) {
         let a = NSAlert(); a.messageText = "iMessage Insights"; a.informativeText = msg
         a.runModal()
+    }
+}
+
+// WKWebView does NOT show JavaScript alert()/confirm()/prompt() unless the host app
+// implements them. The web UI uses prompt() for the vault password and confirm() for
+// AI cost approval — without these, unlocking and saving silently fail.
+extension AppDelegate: WKUIDelegate {
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let a = NSAlert()
+        a.messageText = "iMessage Insights"
+        a.informativeText = message
+        a.runModal()
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let a = NSAlert()
+        a.messageText = "iMessage Insights"
+        a.informativeText = message
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Cancel")
+        completionHandler(a.runModal() == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let a = NSAlert()
+        a.messageText = "iMessage Insights"
+        a.informativeText = prompt
+        // prompt() here is only used for passwords/passphrases — use a secure field.
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = defaultText ?? ""
+        a.accessoryView = field
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        completionHandler(a.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
     }
 }
 
