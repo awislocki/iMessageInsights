@@ -716,24 +716,94 @@ def person_full_history(chat_id):
         con.close()
 
 
-def person_zip(idv):
-    """Build a .zip of a person's COMPLETE history (.md + .txt + .json). Returns (name, bytes)."""
+def _person_bundle(idv):
+    """(title, messages, chat_count, relationship) for a person, any source."""
     s = str(idv)
     if DEMO:
         t = _demo_get(s)
-        if not t:
-            return None
-        title, msgs, chats, rel = t["title"], t["messages"], 1, t["relationship"]
-    elif s.startswith("imp:"):
+        return (t["title"], t["messages"], 1, t["relationship"]) if t else None
+    if s.startswith("imp:"):
         t = get_imported_thread(s)
-        if not t:
-            return None
-        title, msgs, chats, rel = t["title"], t["messages"], 1, t["relationship"]
-    else:
-        ph = person_full_history(int(s))
-        if not ph:
-            return None
-        title, msgs, chats, rel = ph["title"], ph["messages"], ph["chat_count"], ph["relationship"]
+        return (t["title"], t["messages"], 1, t["relationship"]) if t else None
+    ph = person_full_history(int(s))
+    return (ph["title"], ph["messages"], ph["chat_count"], ph["relationship"]) if ph else None
+
+
+# ~120k tokens per part — fits a 200k-token context window with room for the question.
+_AI_PART_CHARS = 480_000
+
+
+def person_ai_zip(idv):
+    """Complete history with one person as an AI-optimized, chunked export.
+
+    Format is built for LLM consumption: minimal tokens (one '## date' header per
+    day, 'HH:MM Sender: text' lines, first names), each part self-describing and
+    sized to fit a large context window. Returns (basename, zip_bytes)."""
+    b = _person_bundle(idv)
+    if not b:
+        return None
+    title, msgs, chats, rel = b
+    if not msgs:
+        return None
+    short = (title.split()[0] if title else "Them")
+    if short.lower() == "me":
+        short = title
+
+    def new_part():
+        return {"lines": [], "start": None, "end": None, "chars": 0, "day": None}
+    parts, p = [], new_part()
+    for m in msgs:
+        ts = m["timestamp"]
+        day, hm = ts[:10], ts[11:16]
+        sender = "Me" if m["is_from_me"] else short
+        block = (f"## {day}\n" if day != p["day"] else "") + f"{hm} {sender}: {m['text']}\n"
+        if p["chars"] + len(block) > _AI_PART_CHARS and p["lines"]:
+            parts.append(p)
+            p = new_part()
+            block = f"## {day}\n{hm} {sender}: {m['text']}\n"
+        if p["start"] is None:
+            p["start"] = ts
+        p["lines"].append(block)
+        p["chars"] += len(block)
+        p["end"] = ts
+        p["day"] = day
+    if p["lines"]:
+        parts.append(p)
+
+    n = len(parts)
+    base = slugify(title)
+    span = f"{msgs[0]['timestamp'][:10]} to {msgs[-1]['timestamp'][:10]}"
+    rel_line = f"# Relationship (per the user): {rel['type']}\n" if rel.get("type") else ""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, pt in enumerate(parts, 1):
+            header = (f"# Conversation with {title}\n"
+                      f"# Part {i} of {n} — {pt['start'][:10]} to {pt['end'][:10]}\n"
+                      f"# {len(msgs):,} total messages ({span})."
+                      f" \"Me\" = the account owner; the other speaker is {short}.\n"
+                      + rel_line +
+                      f"# Format: \"## YYYY-MM-DD\" date headers, then \"HH:MM Sender: message\".\n"
+                      f"# Real chat history provided for AI analysis.\n\n")
+            z.writestr(f"{base}_AI_part{i:02d}_of_{n:02d}.md", header + "".join(pt["lines"]))
+        z.writestr("README.md",
+            f"# AI-optimized export — conversation with {title}\n\n"
+            f"- {len(msgs):,} messages ({span}), split into {n} chronological part(s)"
+            + (f", merged from {chats} chat threads" if chats > 1 else "") + ".\n"
+            f"- Each part fits a large AI context window (~120k tokens).\n"
+            f"- Compact format: one date header per day, 'HH:MM Sender: message' lines.\n\n"
+            f"## How to use\n"
+            f"- One period: upload a single part and ask your question.\n"
+            f"- Whole history: have the AI summarize each part in order, then combine "
+            f"the summaries into an overall analysis.\n")
+    return base, buf.getvalue()
+
+
+def person_zip(idv):
+    """Build a .zip of a person's COMPLETE history (.md + .txt + .json). Returns (name, bytes)."""
+    b = _person_bundle(idv)
+    if not b:
+        return None
+    title, msgs, chats, rel = b
     thread = {"title": title, "is_group": False, "participants": [title],
               "relationship": rel, "messages": msgs}
     base = slugify(title)
@@ -1260,6 +1330,12 @@ class Handler(BaseHTTPRequestHandler):
                 base, data = res
                 return self._send(200, data, "application/zip",
                     {"Content-Disposition": f'attachment; filename="{base}_all_messages.zip"'})
+            if u.path == "/export/person-ai":
+                res = person_ai_zip(qs["id"][0])
+                if not res: return self._json({"error": "not found"}, 404)
+                base, data = res
+                return self._send(200, data, "application/zip",
+                    {"Content-Disposition": f'attachment; filename="{base}_for_AI.zip"'})
             return self._send(404, "Not found")
         except sqlite3.OperationalError as e:
             return self._access_error(e)
@@ -1563,6 +1639,7 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     <select id="relSel" style="display:none" onchange="saveRel()"></select>
     <button id="btnMd" style="display:none" onclick="exportMd()">⬇︎ .md</button>
     <button id="btnZip" style="display:none" onclick="exportZip()" title="Every message with this person, merged across all their chat threads">⬇︎ All (ZIP)</button>
+    <button id="btnAI" style="display:none" onclick="exportAI()" title="Complete history in an AI-optimized format: compact transcript split into context-window-sized parts">🤖 AI export</button>
     <button id="btnPdf" style="display:none" onclick="exportPdf()">🖨 PDF</button>
   </div>
   <div id="loadbar" class="loadinfo" style="display:none">
@@ -1838,7 +1915,7 @@ function render(){
 async function openThread(id){
   current=id; render(); lastSig="";
   curRange = String(id).startsWith('imp:') ? 'all' : 'month';   // imported = historical
-  ['btnMd','btnZip','btnPdf'].forEach(b=>document.getElementById(b).style.display='');
+  ['btnMd','btnZip','btnAI','btnPdf'].forEach(b=>document.getElementById(b).style.display='');
   document.getElementById('icontrols').style.display='block';
   document.getElementById('loadbar').style.display='flex';
   document.getElementById('ibody').innerHTML='<div id="iempty">Add context, then '+
@@ -2129,6 +2206,8 @@ function copyTxt(el,i){ navigator.clipboard.writeText(COPY[i]||''); el.textConte
 function exportMd(){ if(current) location.href='/export/md?id='+current; }
 function exportZip(){ if(current){ toast('Building ZIP — merging all their chats…');
   location.href='/export/person-zip?id='+current; } }
+function exportAI(){ if(current){ toast('Building AI export — full history, chunked…');
+  location.href='/export/person-ai?id='+current; } }
 function exportPdf(){ if(current) window.open('/export/print?id='+current,'_blank'); }
 function exportAll(){ location.href='/export/all'; }
 

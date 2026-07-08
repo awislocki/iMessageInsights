@@ -27,6 +27,9 @@ _All data below is fictional, captured from `python3 server.py --demo`._
   **colored-dot fallback** (hover = full name) and an **initials / full-name toggle**
   (iCloud-only photos that aren't stored locally fall back to a dot)
 - **Filter the thread list by relationship type** (or "Unclassified")
+- **🤖 AI export** per person: their complete history (merged across all their
+  chat threads) as a compact transcript split into ~120k-token parts, each sized
+  to fit a large AI context window — ready to upload to any AI for analysis
 - **Time-range loading** — pick **Day / Week / Month / Year / All time** per
   conversation instead of loading every message (threads can have 50k+); defaults
   to the last month for fast switching
