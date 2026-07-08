@@ -69,7 +69,37 @@ _DEMO_QA = {}
 # complete. The copy is refreshed when the source changes (rate-limited).
 _SNAP = {"path": None, "mtime": 0.0, "ts": 0.0}
 _SNAP_LOCK = threading.Lock()
-_SNAP_MIN_INTERVAL = 20.0   # seconds between re-copies during live use
+# chat.db is ~0.5GB; recopying it every live-poll would thrash the disk. 60s of
+# staleness is invisible in practice (the UI polls every 8s but most polls hit
+# the same snapshot).
+_SNAP_MIN_INTERVAL = 60.0
+
+
+def _cleanup_snapshots(min_age=0):
+    """Remove imsg-snap-* temp dirs. min_age guards against deleting a snapshot a
+    concurrently-running instance (CLI + menu-bar app) is actively using."""
+    tmp = tempfile.gettempdir()
+    now = time.time()
+    try:
+        for name in os.listdir(tmp):
+            if not name.startswith("imsg-snap-"):
+                continue
+            full = os.path.join(tmp, name)
+            if _SNAP["path"] and os.path.dirname(_SNAP["path"]) == full:
+                shutil.rmtree(full, ignore_errors=True)  # our own → always OK
+                continue
+            try:
+                if now - os.path.getmtime(full) > min_age:
+                    shutil.rmtree(full, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+import atexit
+atexit.register(lambda: _cleanup_snapshots(min_age=3600))
+_cleanup_snapshots(min_age=3600)  # sweep hour-old leftovers from prior runs
 
 
 def _db_snapshot():
@@ -1315,16 +1345,6 @@ class Handler(BaseHTTPRequestHandler):
                 cipher = encrypt_bytes(all_threads_zip(), SETTINGS["vault_pw"])
                 return self._send(200, cipher, "application/octet-stream",
                     {"Content-Disposition": 'attachment; filename="imessages_all.zip.enc"'})
-            if u.path == "/export/encrypted":
-                if data.get("scope") == "all":
-                    md = all_threads_markdown(); name = "imessages_all"
-                else:
-                    t = fetch_thread(data["id"])
-                    if not t: return self._json({"error": "not found"}, 404)
-                    md = thread_to_markdown(t); name = slugify(t["title"])
-                cipher = encrypt_bytes(md, data["passphrase"])
-                return self._send(200, cipher, "application/octet-stream",
-                                  {"Content-Disposition": f'attachment; filename="{name}.md.enc"'})
             return self._send(404, "Not found")
         except sqlite3.OperationalError as e:
             return self._access_error(e)
@@ -1871,8 +1891,9 @@ async function refreshOpen(){
   const t=await (await fetch('/api/thread?id='+current+'&range='+curRange)).json();
   if(msgSig(t.messages)!==lastSig){
     paintMessages(t.messages);
-    document.getElementById('loadcount').textContent =
-      t.messages.length + (curRange==='all' ? ' messages (all time)' : ' messages in range');
+    document.getElementById('loadcount').textContent = t.truncated
+      ? `showing last ${t.messages.length} of ${t.truncated.toLocaleString()} messages`
+      : t.messages.length + (curRange==='all' ? ' messages (all time)' : ' messages in range');
   }
 }
 
