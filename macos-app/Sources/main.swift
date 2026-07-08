@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: server process
 
     func serverScript() -> String? {
+        // Override first: lets server.py be updated WITHOUT rebuilding the app.
+        // Rebuilding changes the ad-hoc signature and orphans the Full Disk Access
+        // grant, so feature updates ship as a file copy to ~/.imessage-export/.
+        let override = NSString(string: "~/.imessage-export/server.py").expandingTildeInPath
+        if FileManager.default.fileExists(atPath: override) { return override }
         if let p = Bundle.main.path(forResource: "server", ofType: "py") { return p }
         let dev = FileManager.default.currentDirectoryPath + "/../server.py"   // dev fallback
         return FileManager.default.fileExists(atPath: dev) ? dev : nil

@@ -47,6 +47,21 @@ GitHub Releases.
 
 Want it in `/Applications`? Drag the `.app` there.
 
+## Updating without breaking Full Disk Access
+
+Rebuilding the app changes its (ad-hoc) code signature, which makes macOS forget
+the Full Disk Access grant. To avoid that, the app **prefers
+`~/.imessage-export/server.py` over its bundled copy** — so server/UI updates are
+just a file copy, no rebuild:
+
+```bash
+git pull
+./update-server.sh     # copies ../server.py to ~/.imessage-export/server.py
+# then Quit + reopen the app from the menu bar
+```
+
+Only changes to the Swift wrapper itself require a rebuild (and one FDA re-toggle).
+
 ## How it works
 
 - On launch it spawns `python3 .../server.py --no-browser --port 8770` (the script is
